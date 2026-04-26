@@ -43,7 +43,7 @@ TEAM_MODE=0
 NO_TEAM_MODE=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --host) [ -z "$2" ] && echo "Missing value for --host (expected claude, codex, kiro, factory, opencode, openclaw, hermes, gbrain, or auto)" >&2 && exit 1; HOST="$2"; shift 2 ;;
+    --host) [ -z "$2" ] && echo "Missing value for --host (expected claude, codex, kiro, factory, opencode, openclaw, hermes, gbrain, deepseek, or auto)" >&2 && exit 1; HOST="$2"; shift 2 ;;
     --host=*) HOST="${1#--host=}"; shift ;;
     --local) LOCAL_INSTALL=1; shift ;;
     --prefix)    SKILL_PREFIX=1; SKILL_PREFIX_FLAG=1; shift ;;
@@ -56,7 +56,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$HOST" in
-  claude|codex|kiro|factory|opencode|auto) ;;
+  claude|codex|kiro|factory|opencode|deepseek|auto) ;;
   openclaw)
     echo ""
     echo "OpenClaw integration uses a different model — OpenClaw spawns Claude Code"
@@ -155,12 +155,14 @@ INSTALL_CODEX=0
 INSTALL_KIRO=0
 INSTALL_FACTORY=0
 INSTALL_OPENCODE=0
+INSTALL_DEEPSEEK=0
 if [ "$HOST" = "auto" ]; then
   command -v claude >/dev/null 2>&1 && INSTALL_CLAUDE=1
   command -v codex >/dev/null 2>&1 && INSTALL_CODEX=1
   command -v kiro-cli >/dev/null 2>&1 && INSTALL_KIRO=1
   command -v droid >/dev/null 2>&1 && INSTALL_FACTORY=1
   command -v opencode >/dev/null 2>&1 && INSTALL_OPENCODE=1
+  command -v gstack-deepseek >/dev/null 2>&1 && INSTALL_DEEPSEEK=1
   # If none found, default to claude
   if [ "$INSTALL_CLAUDE" -eq 0 ] && [ "$INSTALL_CODEX" -eq 0 ] && [ "$INSTALL_KIRO" -eq 0 ] && [ "$INSTALL_FACTORY" -eq 0 ] && [ "$INSTALL_OPENCODE" -eq 0 ]; then
     INSTALL_CLAUDE=1
@@ -175,6 +177,8 @@ elif [ "$HOST" = "factory" ]; then
   INSTALL_FACTORY=1
 elif [ "$HOST" = "opencode" ]; then
   INSTALL_OPENCODE=1
+elif [ "$HOST" = "deepseek" ]; then
+  INSTALL_DEEPSEEK=1
 fi
 
 migrate_direct_codex_install() {
@@ -933,6 +937,69 @@ if [ "$INSTALL_OPENCODE" -eq 1 ]; then
   echo "gstack ready (opencode)."
   echo "  browse: $BROWSE_BIN"
   echo "  opencode skills: $OPENCODE_SKILLS"
+fi
+
+# 6d. Install for DeepSeek
+if [ "$INSTALL_DEEPSEEK" -eq 1 ]; then
+  DEEPSEEK_SKILLS="$HOME/.deepseek/skills"
+  DEEPSEEK_GSTACK="$DEEPSEEK_SKILLS/gstack"
+  mkdir -p "$DEEPSEEK_SKILLS"
+
+  # Create gstack dir with symlinks for runtime assets
+  [ -L "$DEEPSEEK_GSTACK" ] && rm -f "$DEEPSEEK_GSTACK"
+  mkdir -p "$DEEPSEEK_GSTACK" "$DEEPSEEK_GSTACK/browse" "$DEEPSEEK_GSTACK/gstack-upgrade" "$DEEPSEEK_GSTACK/review"
+  ln -snf "$SOURCE_GSTACK_DIR/bin" "$DEEPSEEK_GSTACK/bin"
+  ln -snf "$SOURCE_GSTACK_DIR/browse/dist" "$DEEPSEEK_GSTACK/browse/dist"
+  ln -snf "$SOURCE_GSTACK_DIR/browse/bin" "$DEEPSEEK_GSTACK/browse/bin"
+  if [ -f "$SOURCE_GSTACK_DIR/ETHOS.md" ]; then
+    ln -snf "$SOURCE_GSTACK_DIR/ETHOS.md" "$DEEPSEEK_GSTACK/ETHOS.md"
+  fi
+  # gstack-upgrade skill
+  DEEPSEEK_AGENTS_DIR="$SOURCE_GSTACK_DIR/.deepseek/skills"
+  if [ -d "$DEEPSEEK_AGENTS_DIR/gstack-upgrade" ] && [ -f "$DEEPSEEK_AGENTS_DIR/gstack-upgrade/SKILL.md" ]; then
+    ln -snf "$DEEPSEEK_AGENTS_DIR/gstack-upgrade/SKILL.md" "$DEEPSEEK_GSTACK/gstack-upgrade/SKILL.md"
+  fi
+  # Review runtime assets
+  for f in checklist.md design-checklist.md greptile-triage.md TODOS-format.md; do
+    if [ -f "$SOURCE_GSTACK_DIR/review/$f" ]; then
+      ln -snf "$SOURCE_GSTACK_DIR/review/$f" "$DEEPSEEK_GSTACK/review/$f"
+    fi
+  done
+
+  # Link generated DeepSeek-format skills
+  if [ ! -d "$DEEPSEEK_AGENTS_DIR" ]; then
+    echo "  Generating .deepseek/ skill docs..."
+    ( cd "$SOURCE_GSTACK_DIR" && bun run gen:skill-docs --host deepseek )
+  fi
+  if [ -d "$DEEPSEEK_AGENTS_DIR" ]; then
+    for skill_dir in "$DEEPSEEK_AGENTS_DIR"/gstack*/; do
+      [ -f "$skill_dir/SKILL.md" ] || continue
+      skill_name="$(basename "$skill_dir")"
+      [ "$skill_name" = "gstack" ] && continue
+      target="$DEEPSEEK_SKILLS/$skill_name"
+      if [ -L "$target" ] || [ ! -e "$target" ]; then
+        ln -snf "$skill_dir" "$target"
+      fi
+    done
+  fi
+
+  # Install DeepSeek CLI
+  DEEPSEEK_CLI_SRC="$SOURCE_GSTACK_DIR/deepseek-cli/gstack-deepseek.js"
+  DEEPSEEK_CLI_DST="$HOME/.local/bin/gstack-deepseek"
+  if [ -f "$DEEPSEEK_CLI_SRC" ]; then
+    mkdir -p "$HOME/.local/bin"
+    ln -snf "$DEEPSEEK_CLI_SRC" "$DEEPSEEK_CLI_DST" 2>/dev/null || cp "$DEEPSEEK_CLI_SRC" "$DEEPSEEK_CLI_DST"
+    chmod +x "$DEEPSEEK_CLI_DST" 2>/dev/null || true
+  fi
+
+  echo "gstack ready (deepseek)."
+  echo "  browse: $BROWSE_BIN"
+  echo "  deepseek skills: $DEEPSEEK_SKILLS"
+  echo "  deepseek cli: $DEEPSEEK_CLI_DST"
+  echo ""
+  echo "  使用方法:"
+  echo "    export DEEPSEEK_API_KEY=your-api-key"
+  echo "    gstack-deepseek /office-hours"
 fi
 
 # 7. Create .agents/ sidecar symlinks for the real Codex skill target.
