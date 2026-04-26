@@ -159,11 +159,24 @@ function callDeepSeek(messages, onChunk) {
 
 // ─── 系统提示词 ──────────────────────────────────────────────
 function buildSystemPrompt(skillContent) {
-  let system = `你是 gstack AI 助手，一个专业的软件工程团队。你可以使用以下工具与用户环境交互：
+  // 预处理技能内容：将 Claude Code 专有语法转为 DeepSeek 兼容格式
+  let processedSkill = skillContent || '';
+  // 将 ```bash 代码块标注为"建议用户执行的命令"
+  processedSkill = processedSkill.replace(/```bash\n/g, '【执行命令】\n');
+  processedSkill = processedSkill.replace(/```\n/g, '\n【/执行命令】\n');
+  // 移除 Claude Code 专有的工具调用语法
+  processedSkill = processedSkill.replace(/\$B\s+/g, 'browse ');
+  processedSkill = processedSkill.replace(/AskUserQuestion/g, '向用户提问');
 
-## 可用工具
+  let system = `你是 gstack AI 助手，一个专业的软件工程团队。
 
-你无法直接执行命令或编辑文件，但你可以指导用户执行。输出命令时使用 \`\`\`bash 代码块格式。
+## 重要规则
+1. 你无法直接执行命令或编辑文件，只能通过文字指导用户
+2. 当需要用户执行命令时，使用 \`\`\`bash 代码块，并说明"请在终端执行："
+3. 当需要创建/编辑文件时，说明文件路径，然后使用 \`\`\` 代码块给出完整内容
+4. 技能指令中的【执行命令】标记表示建议用户执行的命令，不要原样输出标记本身
+5. 使用中文回复
+6. 结构化输出，使用标题和列表组织内容
 
 ## 工作目录
 ${process.cwd()}
@@ -190,14 +203,14 @@ ${process.cwd()}
   }
 
   // 注入技能内容
-  if (skillContent) {
-    system += `\n## 当前技能指令\n\n${skillContent}\n`;
+  if (processedSkill) {
+    system += `\n## 当前技能指令\n\n${processedSkill}\n`;
   }
 
   system += `\n## 输出规范
 - 使用中文回复
-- 需要执行命令时，输出 \`\`\`bash 代码块
-- 需要创建/编辑文件时，输出完整代码块并说明文件路径
+- 需要执行命令时，输出 \`\`\`bash 代码块并提示"请在终端执行："
+- 需要创建/编辑文件时，说明文件路径并给出完整代码块
 - 结构化输出，使用标题和列表组织内容
 `;
 
@@ -219,9 +232,16 @@ async function interactiveSession(initialSkill) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
+    prompt: '❯ ',
   });
 
-  const question = (prompt) => new Promise(resolve => rl.question(prompt, resolve));
+  // 防止未捕获异常导致崩溃
+  process.on('uncaughtException', (err) => {
+    if (err.code === 'EPIPE') {
+      process.exit(0);
+    }
+    console.error(`\n⚠️ 错误: ${err.message}`);
+  });
 
   console.log(`\n🚀 gstack-deepseek v1.0`);
   console.log(`   模型: ${MODEL}`);
@@ -232,9 +252,27 @@ async function interactiveSession(initialSkill) {
   }
   console.log(`\n输入消息开始对话，输入 /help 查看帮助\n`);
 
-  while (true) {
-    const input = (await question('❯ ')).trim();
-    if (!input) continue;
+  // 如果初始加载了技能，自动触发
+  if (currentSkill) {
+    messages.push({ role: 'user', content: `请运行 /${currentSkill.name} 技能` });
+    process.stdout.write('\n');
+    try {
+      const response = await callDeepSeek(messages, (chunk) => {
+        process.stdout.write(chunk);
+      });
+      messages.push({ role: 'assistant', content: response });
+      console.log('\n');
+    } catch (err) {
+      console.error(`\n❌ 错误: ${err.message}\n`);
+      messages.pop();
+    }
+  }
+
+  rl.prompt();
+
+  rl.on('line', async (line) => {
+    const input = line.trim();
+    if (!input) { rl.prompt(); return; }
 
     // 命令处理
     if (input === '/exit' || input === '/quit') {
@@ -252,7 +290,8 @@ async function interactiveSession(initialSkill) {
   /model <名>   — 切换模型
   /exit         — 退出
 `);
-      continue;
+      rl.prompt();
+      return;
     }
 
     if (input === '/list') {
@@ -262,14 +301,16 @@ async function interactiveSession(initialSkill) {
         console.log(`  /${s.name.padEnd(25)} ${s.description.slice(0, 60)}`);
       }
       console.log('');
-      continue;
+      rl.prompt();
+      return;
     }
 
     if (input === '/clear') {
       messages.length = 0;
       updateSystem();
       console.log('对话已清除\n');
-      continue;
+      rl.prompt();
+      return;
     }
 
     if (input.startsWith('/model ')) {
@@ -278,7 +319,8 @@ async function interactiveSession(initialSkill) {
         process.env.DEEPSEEK_MODEL = newModel;
         console.log(`模型已切换为: ${newModel}\n`);
       }
-      continue;
+      rl.prompt();
+      return;
     }
 
     // 技能加载
@@ -289,11 +331,24 @@ async function interactiveSession(initialSkill) {
         currentSkill = skill;
         updateSystem();
         console.log(`✅ 已加载技能: /${skill.name}\n`);
-        continue;
+        // 自动发送技能触发消息
+        messages.push({ role: 'user', content: `请运行 /${skill.name} 技能` });
+        process.stdout.write('\n');
+        try {
+          const response = await callDeepSeek(messages, (chunk) => {
+            process.stdout.write(chunk);
+          });
+          messages.push({ role: 'assistant', content: response });
+          console.log('\n');
+        } catch (err) {
+          console.error(`\n❌ 错误: ${err.message}\n`);
+          messages.pop();
+        }
       } else {
         console.log(`❌ 未找到技能: ${skillName}。输入 /list 查看所有技能\n`);
-        continue;
       }
+      rl.prompt();
+      return;
     }
 
     // 发送消息到 DeepSeek
@@ -310,7 +365,13 @@ async function interactiveSession(initialSkill) {
       console.error(`\n❌ 错误: ${err.message}\n`);
       messages.pop(); // 移除失败的用户消息
     }
-  }
+    rl.prompt();
+  });
+
+  rl.on('close', () => {
+    console.log('\n再见！');
+    process.exit(0);
+  });
 }
 
 // ─── 单次技能运行 ──────────────────────────────────────────────
